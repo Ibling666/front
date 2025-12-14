@@ -29,10 +29,14 @@ import CrearReporteDirector from '@/views/CrearReporteDirector.vue'
 import EstadoEstudiante from '@/views/EstadoEstudiante.vue'
 import MenuSeguridad from '@/views/MenuSeguridad.vue'
 import GestionUsuariosRoles from '@/views/GestionUsuariosRoles.vue'
+import AnalisisRiesgos from '@/views/AnalisisRiesgos.vue'
+import LogUsuario from '@/views/LogUsuario.vue'
 
 
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap/dist/js/bootstrap.bundle.min.js';
+import { protectedAxios } from '@/axiosConfig';
+import { BASE_URL } from '@/config/globals';
 
 
 // Definir las rutas con accessKey en meta para protección por acceso
@@ -223,6 +227,18 @@ const router = createRouter({
       component: GestionUsuariosRoles,
       meta: { requiresAuth: true, accessKey: 'Gestión de usuarios y roles' }
     },
+    {
+      path: '/log-usuario',
+      name: 'LogUsuario',
+      component: LogUsuario,
+      meta: { requiresAuth: true, accessKey: 'Revisión de Logs' }
+    },
+    {
+      path: '/analisis-riesgos',
+      name: 'AnalisisRiesgos',
+      component: AnalisisRiesgos,
+      meta: { requiresAuth: true, accessKey: 'Análisis de riesgos' }
+    },
   ],
   scrollBehavior(to, from, savedPosition) {
     if (savedPosition) {
@@ -235,34 +251,128 @@ const router = createRouter({
 
 
 // Protección de rutas basada en accesos
-router.beforeEach((to, from, next) => {
+// Protección de rutas basada en accesos (más robusta)
+function normalizeText(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function parseAccesses(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map(item => {
+        if (item === null || item === undefined) return '';
+        if (typeof item === 'string') return item;
+        if (typeof item === 'object') return item.nombre || item.name || item.access || item.accessKey || item.descripcion || JSON.stringify(item);
+        return String(item);
+      }).filter(Boolean);
+    }
+    if (typeof parsed === 'object') {
+      return Object.values(parsed).map(String).filter(Boolean);
+    }
+    return String(parsed).split(',').map(s => s.trim()).filter(Boolean);
+  } catch (e) {
+    return String(raw).split(',').map(s => s.trim()).filter(Boolean);
+  }
+}
+
+router.beforeEach(async (to, from, next) => {
   const requiresAuth = to.matched.some(record => record.meta.requiresAuth);
   const token = localStorage.getItem('authToken');
-  // Accesos del usuario guardados en localStorage como array de strings
-  let userAccesses = [];
-  try {
-    userAccesses = JSON.parse(localStorage.getItem('accesos') || '[]');
-  } catch (e) {
-    userAccesses = [];
+
+  // Intentamos obtener accesos desde localStorage (fallback principal)
+  let userAccesses = parseAccesses(localStorage.getItem('accesos') || '');
+
+  // Si no hay accesos en localStorage, probar sessionStorage
+  if (userAccesses.length === 0) {
+    userAccesses = parseAccesses(sessionStorage.getItem('accesos') || '');
   }
 
-  // Si la ruta requiere autenticación y no hay token, redirige al inicio
+  // También soportar una variable global que algunos despliegues podrían usar
+  if (userAccesses.length === 0 && typeof window !== 'undefined' && Array.isArray(window.__ACCESOS__)) {
+    userAccesses = window.__ACCESOS__.map(String).filter(Boolean);
+  }
+
   if (requiresAuth && !token) {
     return next({ path: '/' });
   }
 
-  // Si la ruta requiere acceso específico, verifica si el usuario lo tiene
   const requiredAccess = to.meta.accessKey;
   if (requiresAuth && requiredAccess) {
-    // Normaliza espacios y mayúsculas/minúsculas
-    const normalizedAccesses = userAccesses.map(a => a.trim().toLowerCase());
-    const normalizedRequired = requiredAccess.trim().toLowerCase();
-    if (!normalizedAccesses.includes(normalizedRequired)) {
+    const normalizedAccesses = userAccesses.map(a => normalizeText(a));
+    const normalizedRequired = normalizeText(requiredAccess);
+
+    // Matching más permisivo: igualdad o inclusión (para evitar diferencias leves)
+    function accessMatches(req, acc) {
+      if (!req || !acc) return false;
+      return acc === req || acc.includes(req) || req.includes(acc);
+    }
+
+    let hasAccess = normalizedAccesses.some(a => accessMatches(normalizedRequired, a));
+
+    // Si no tenemos el acceso, intentar refrescar accesos desde backend (por si cambiaron en DB)
+    if (!hasAccess && token) {
+      try {
+        console.debug('[router] intentando refrescar accesos desde backend...');
+        const tryEndpoints = ['/auth/me', '/auth/profile', '/usuario/me', '/usuarios/me', '/auth/user'];
+        let refreshed = [];
+        for (const ep of tryEndpoints) {
+          try {
+            const resp = await protectedAxios.get(ep);
+            const body = resp?.data || {};
+            // revisar varias formas donde el backend puede devolver accesos
+            const candidate = body.accesos || body.data?.accesos || body.accesses || body.data?.accesses || body.accesosUsuario || body.accesos || null;
+            if (candidate) {
+              refreshed = Array.isArray(candidate) ? candidate : (typeof candidate === 'string' ? candidate.split(',') : Object.values(candidate));
+              break;
+            }
+            // some backends might return access inside user object
+            const candidate2 = body.data || body.user || null;
+            if (candidate2) {
+              const c = candidate2.accesos || candidate2.accesses || candidate2.roles || null;
+              if (c) {
+                refreshed = Array.isArray(c) ? c : (typeof c === 'string' ? c.split(',') : Object.values(c));
+                break;
+              }
+            }
+          } catch (e) {
+            // probar siguiente endpoint
+          }
+        }
+        if (refreshed.length > 0) {
+          localStorage.setItem('accesos', JSON.stringify(refreshed));
+          userAccesses = parseAccesses(localStorage.getItem('accesos') || '');
+          const normalizedAfter = userAccesses.map(a => normalizeText(a));
+          hasAccess = normalizedAfter.some(a => accessMatches(normalizedRequired, a));
+          console.debug('[router] accesos refrescados:', refreshed, 'hasAccess:', hasAccess);
+        } else {
+          console.debug('[router] no se obtuvieron accesos al refrescar');
+        }
+      } catch (e) {
+        console.debug('[router] error al refrescar accesos:', e);
+      }
+    }
+
+    // Depuración temporal: mostrar datos para entender por qué falla
+    if (!hasAccess) {
+      try {
+        console.debug('[router] requiresAuth:', requiresAuth, 'route:', to.name || to.path);
+        console.debug('[router] token present:', !!token);
+        console.debug('[router] requiredAccess:', requiredAccess, '->', normalizedRequired);
+        console.debug('[router] userAccesses:', userAccesses);
+        console.debug('[router] normalizedAccesses:', normalizedAccesses);
+      } catch (e) {}
       return next({ name: 'AccesoDenegado' });
     }
   }
 
-  // Si todo está bien, permitir el acceso a la ruta
   next();
 });
 

@@ -7,10 +7,11 @@
       </header>
     </section>
 
-    <!-- Password Configuration Section (show when in config mode) -->
+    <!-- Main Content -->
       <div class="config-container">
         <div class="config-header">
           <h2>Configuración de Políticas de Seguridad</h2>
+          <button @click="goBackToMenu" class="btn-back">← Volver al Menú</button>
         </div>
         
         <p class="config-description">
@@ -183,9 +184,7 @@
                   <td>{{ cfg.usuarioModificacion }}</td>
                   <td>
                     <button @click="loadIntoForm(cfg)" class="btn-load">Cargar</button>
-                    <button @click="deleteConfiguration(cfg.idConfig)" class="btn-delete" :disabled="cfg.activa">
-                      Eliminar
-                    </button>
+                    <button @click="deleteConfiguration(cfg)" class="btn-delete" :disabled="cfg.activa">Eliminar</button>
                   </td>
                 </tr>
               </tbody>
@@ -312,43 +311,68 @@ export default {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
 
-    async deleteConfiguration(configId) {
-      try {
-        const result = await Swal.fire({
-          title: '¿Está seguro?',
-          text: 'Esta acción eliminará permanentemente la configuración seleccionada.',
+    async deleteConfiguration(config) {
+      if (!config) return;
+
+      // Prevent deletion of active configuration
+      if (config.activa) {
+        await Swal.fire({
           icon: 'warning',
-          showCancelButton: true,
-          confirmButtonColor: '#d33',
-          cancelButtonColor: '#3085d6',
-          confirmButtonText: 'Sí, eliminar',
-          cancelButtonText: 'Cancelar'
+          title: 'No se puede eliminar',
+          text: 'No se puede eliminar la configuración activa. Primero active otra configuración.',
+        });
+        return;
+      }
+
+      // Confirm deletion
+      const result = await Swal.fire({
+        title: '¿Está seguro?',
+        text: `¿Desea eliminar la configuración ID ${config.idConfig}?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        cancelButtonColor: '#3085d6',
+        confirmButtonText: 'Sí, eliminar',
+        cancelButtonText: 'Cancelar'
+      });
+
+      if (!result.isConfirmed) return;
+
+      try {
+        const token = localStorage.getItem('authToken');
+        const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+
+        const backend = await getBackendUrl();
+        const response = await this.$publicAxios.delete(`${backend}/configuracion-seguridad/${config.idConfig}`, {
+          headers
         });
 
-        if (result.isConfirmed) {
-          const token = localStorage.getItem('authToken');
-          const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-          
-          const backend = await getBackendUrl();
-          await this.$publicAxios.delete(`${backend}/configuracion-seguridad/${configId}`, { headers });
-          
+        if (response.data && response.data.status === '200 OK') {
           await Swal.fire({
             icon: 'success',
-            title: 'Eliminado',
-            text: 'La configuración ha sido eliminada exitosamente.',
-            confirmButtonText: 'Aceptar'
+            title: 'Configuración Eliminada',
+            text: 'La configuración se ha eliminado exitosamente.',
           });
-          
-          // Reload configurations
+
+          // Reload configurations list
           await this.loadAllConfigurations();
         }
       } catch (error) {
         console.error('Error deleting configuration:', error);
+        let errorMessage = 'Error al eliminar la configuración.';
+
+        if (error.response?.status === 404) {
+          errorMessage = 'Configuración no encontrada.';
+        } else if (error.response?.status === 409) {
+          errorMessage = 'No se puede eliminar la configuración activa.';
+        } else if (error.response?.data?.message) {
+          errorMessage = error.response.data.message;
+        }
+
         await Swal.fire({
           icon: 'error',
           title: 'Error',
-          text: 'No se pudo eliminar la configuración. Inténtelo nuevamente.',
-          confirmButtonText: 'Aceptar'
+          text: errorMessage
         });
       }
     },
@@ -768,6 +792,7 @@ footer {
 .btn-delete:disabled { 
   background: #6c757d; 
   cursor: not-allowed; 
+  opacity: 0.6; 
 }
 
 /* Responsive */

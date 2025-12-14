@@ -34,7 +34,7 @@ export async function getBackendUrl() {
   }
 
   // If none matched, default to env var or localhost:8080
-  cachedUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8080';
+  cachedUrl = import.meta.env.VITE_BACKEND_URL || 'https://backend-production-24f7.up.railway.app/';
   return cachedUrl;
 }
 
